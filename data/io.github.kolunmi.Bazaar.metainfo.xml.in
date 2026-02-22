@@ -75,9 +75,20 @@
     <release version="0.7.10" date="2026-02-22">
       <url type="details">https://github.com/kolunmi/bazaar/releases/tag/v0.7.10</url>
       <description translate="no">
-        Along with the ability to to cancel transactions in the library view and
-        a brand new screenshots carousel from 0.7.9, this release greatly
-        improves search functionality.
+        <p>
+          This release fixes some bugs and greatly improves search
+          functionality.
+        </p>
+        <p>
+          If you missed the previous release, in 0.7.9 we also added the ability
+          to to cancel transactions in the library view, a brand new screenshots
+          carousel, search suggestion buttons, and app runtime size information.
+          You can also now skip confirmation dialogs but holding shift as you
+          start a transaction.
+        </p>
+        <p>
+          Thanks for reading!
+        </p>
       </description>
     </release>
     <release version="0.7.9" date="2026-02-21">
