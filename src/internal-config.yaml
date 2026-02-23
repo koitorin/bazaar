@@ -31,5 +31,10 @@ search-biases:
       - org.gnome.Builder
       - org.kde.kdevelop
 
+  - regex: \b(?i)daw\b
+    boost-appids:
+      # this doesn't normally show, despite being a DAW
+      - io.lmms.LMMS
+
   - regex: \b(?i)yt\b
     convert-to: youtube
