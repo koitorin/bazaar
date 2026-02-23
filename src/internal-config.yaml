@@ -33,7 +33,8 @@ search-biases:
 
   - regex: \b(?i)daw\b
     boost-appids:
-      # this doesn't normally show, despite being a DAW
+      # these don't normally show, despite being DAWs
+      - fm.reaper.Reaper
       - io.lmms.LMMS
 
   - regex: \b(?i)yt\b
