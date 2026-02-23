@@ -20,6 +20,9 @@ search-biases:
   - regex: (?i)ide
     convert-to: development
     boost-appids:
+      - com.visualstudio.code
+      - com.vscodium.codium
+      - dev.zed.Zed
       - org.gnome.Builder
       - org.kde.kdevelop
 
