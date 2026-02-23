@@ -45,5 +45,11 @@ search-biases:
     boost-appids:
       - org.inkscape.Inkscape
 
+  - regex: \b(?i)dl\b
+    convert-to: download
+
   - regex: \b(?i)yt\b
     convert-to: youtube
+
+  - regex: \b(?i)vids?\b
+    convert-to: video
