@@ -69,6 +69,12 @@ cmp_scores (Score *a,
 #define SAME_CLUSTER   0.1
 #define NO_MATCH       0.0
 
+enum
+{
+  LINEAR,
+  EXPONENTIAL,
+};
+
 BZ_DEFINE_DATA (
     bias,
     Bias,
@@ -76,6 +82,20 @@ BZ_DEFINE_DATA (
       GRegex     *regex;
       char       *convert_to;
       GHashTable *boost;
+      int         boost_kind;
+      union
+      {
+        struct
+        {
+          double slope;
+          double y_intercept;
+        } linear_boost;
+        struct
+        {
+          double factor;
+          double y_intercept;
+        } exponential_boost;
+      };
     },
     BZ_RELEASE_DATA (regex, g_regex_unref);
     BZ_RELEASE_DATA (convert_to, g_free);
@@ -244,24 +264,36 @@ bz_search_engine_set_internal_config (BzSearchEngine   *self,
 
       for (guint i = 0; i < n_biases; i++)
         {
-          g_autoptr (GError) local_error = NULL;
-          g_autoptr (BzSearchBias) bias  = NULL;
-          const char *regex_string       = NULL;
-          const char *convert_to         = NULL;
-          GListModel *boost_appids       = NULL;
-          g_autoptr (GRegex) regex       = NULL;
-          g_autoptr (GHashTable) boost   = NULL;
-          g_autoptr (BiasData) data      = NULL;
+          g_autoptr (GError) local_error              = NULL;
+          g_autoptr (BzSearchBias) bias               = NULL;
+          const char            *regex_string         = NULL;
+          const char            *convert_to           = NULL;
+          GListModel            *boost_appids         = NULL;
+          BzLinearFunction      *linear_function      = NULL;
+          BzExponentialFunction *exponential_function = NULL;
+          g_autoptr (GRegex) regex                    = NULL;
+          g_autoptr (GHashTable) boost                = NULL;
+          g_autoptr (BiasData) data                   = NULL;
 
-          bias         = g_list_model_get_item (biases, i);
-          regex_string = bz_search_bias_get_regex (bias);
-          convert_to   = bz_search_bias_get_convert_to (bias);
-          boost_appids = bz_search_bias_get_boost_appids (bias);
+          bias                 = g_list_model_get_item (biases, i);
+          regex_string         = bz_search_bias_get_regex (bias);
+          convert_to           = bz_search_bias_get_convert_to (bias);
+          boost_appids         = bz_search_bias_get_boost_appids (bias);
+          linear_function      = bz_search_bias_get_linear_boost (bias);
+          exponential_function = bz_search_bias_get_exponential_boost (bias);
           if (regex_string == NULL ||
               (convert_to == NULL &&
-               boost_appids == NULL))
+               (boost_appids == NULL ||
+                (linear_function == NULL &&
+                 exponential_function == NULL))))
             {
-              g_critical ("Internal search bias is incomplete!");
+              g_critical ("Internal search bias is incomplete! Skipping...");
+              continue;
+            }
+          if (linear_function != NULL &&
+              exponential_function != NULL)
+            {
+              g_critical ("Search bias can only have one boost function! Skipping...");
               continue;
             }
 
@@ -302,6 +334,20 @@ bz_search_engine_set_internal_config (BzSearchEngine   *self,
           data->regex      = g_regex_ref (regex);
           data->convert_to = bz_maybe_strdup (convert_to);
           data->boost      = bz_maybe_ref (boost, g_hash_table_ref);
+
+          if (linear_function != NULL)
+            {
+              data->boost_kind               = LINEAR;
+              data->linear_boost.slope       = bz_linear_function_get_slope (linear_function);
+              data->linear_boost.y_intercept = bz_linear_function_get_y_intercept (linear_function);
+            }
+          if (exponential_function != NULL)
+            {
+              data->boost_kind                    = EXPONENTIAL;
+              data->exponential_boost.factor      = bz_exponential_function_get_factor (exponential_function);
+              data->exponential_boost.y_intercept = bz_exponential_function_get_y_intercept (exponential_function);
+            }
+
           g_ptr_array_add (self->biases, bias_data_ref (data));
         }
     }
@@ -553,7 +599,7 @@ query_sub_task_fiber (QuerySubTaskData *data)
       title = bz_entry_group_get_title (group);
       if ((id != NULL && g_strcmp0 (query_utf8, id) == 0) ||
           (title != NULL && strcasecmp (query_utf8, title) == 0))
-        score = (double) G_MAXUINT;
+        score = (double) G_MAXINT;
       else
         {
           const char *developer     = NULL;
@@ -585,11 +631,19 @@ query_sub_task_fiber (QuerySubTaskData *data)
           if (bias->boost == NULL)
             continue;
 
-          if (g_hash_table_contains (bias->boost, id))
+          if (!g_hash_table_contains (bias->boost, id))
+            continue;
+
+          switch (bias->boost_kind)
             {
-              if (score < threshold)
-                score = threshold;
-              score *= 4.0;
+            case LINEAR:
+              score = bias->linear_boost.slope * score + bias->linear_boost.y_intercept;
+              break;
+            case EXPONENTIAL:
+              score = pow (bias->exponential_boost.factor, score) + bias->exponential_boost.y_intercept;
+              break;
+            default:
+              break;
             }
         }
 
