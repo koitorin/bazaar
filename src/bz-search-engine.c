@@ -532,36 +532,33 @@ query_task_fiber (QueryTaskData *data)
   scores_per_task = shallow_mirror->len / n_sub_tasks;
 
   active_biases = g_ptr_array_new_with_free_func (bias_data_unref);
-  if (biases->len > 0)
+  for (guint i = 0; i < biases->len; i++)
     {
-      for (guint i = 0; i < biases->len; i++)
+      BiasData *bias = NULL;
+
+      bias = g_ptr_array_index (biases, i);
+      if (bias->invalid)
+        continue;
+
+      if (!g_regex_match (bias->regex, query_utf8, G_REGEX_MATCH_DEFAULT, NULL))
+        continue;
+
+      if (bias->convert_to != NULL)
         {
-          BiasData *bias = NULL;
+          g_autofree char *tmp = NULL;
 
-          bias = g_ptr_array_index (biases, i);
-          if (bias->invalid)
-            continue;
-
-          if (!g_regex_match (bias->regex, query_utf8, G_REGEX_MATCH_DEFAULT, NULL))
-            continue;
-
-          if (bias->convert_to != NULL)
+          tmp = g_regex_replace (
+              bias->regex, query_utf8,
+              -1, 0, bias->convert_to,
+              G_REGEX_MATCH_DEFAULT, NULL);
+          if (tmp != NULL)
             {
-              g_autofree char *tmp = NULL;
-
-              tmp = g_regex_replace (
-                  bias->regex, query_utf8,
-                  -1, 0, bias->convert_to,
-                  G_REGEX_MATCH_DEFAULT, NULL);
-              if (tmp != NULL)
-                {
-                  g_clear_pointer (&query_utf8, g_free);
-                  query_utf8 = g_steal_pointer (&tmp);
-                }
+              g_clear_pointer (&query_utf8, g_free);
+              query_utf8 = g_steal_pointer (&tmp);
             }
-
-          g_ptr_array_add (active_biases, bias_data_ref (bias));
         }
+
+      g_ptr_array_add (active_biases, bias_data_ref (bias));
     }
 
   sub_futures = g_ptr_array_new_with_free_func (dex_unref);
