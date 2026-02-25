@@ -1,4 +1,4 @@
-/* bz-donations-dialog.h
+/* bz-hooks.h
  *
  * Copyright 2026 Eva M
  *
@@ -20,18 +20,22 @@
 
 #pragma once
 
-#include <adwaita.h>
-
-#include "bz-state-info.h"
+#include "bz-entry-group.h"
+#include "bz-hook.h"
 
 G_BEGIN_DECLS
 
-#define BZ_TYPE_DONATIONS_DIALOG (bz_donations_dialog_get_type ())
-G_DECLARE_FINAL_TYPE (BzDonationsDialog, bz_donations_dialog, BZ, DONATIONS_DIALOG, AdwDialog)
+DexFuture *
+bz_execute_hook (BzHook               *hook,
+                 BzHookTransactionType ts_type,
+                 const char           *ts_appid,
+                 BzEntryGroup         *group);
 
-AdwDialog *
-bz_donations_dialog_new (void);
+DexFuture *
+bz_run_hook_emission (GListModel           *hooks,
+                      BzHookSignal          signal,
+                      BzHookTransactionType ts_type,
+                      const char           *ts_appid,
+                      BzEntryGroup         *group);
 
 G_END_DECLS
-
-/* End of bz-donations-dialog.h */

@@ -33,6 +33,7 @@
 #include "bz-flathub-page.h"
 #include "bz-full-view.h"
 #include "bz-global-progress.h"
+#include "bz-hooks.h"
 #include "bz-io.h"
 #include "bz-library-page.h"
 #include "bz-popup-overlay.h"
@@ -137,6 +138,11 @@ bulk_install (BzWindow *self,
 
 static void
 set_page (BzWindow *self);
+
+static void
+emit_hook_disown (BzWindow     *self,
+                  BzHookSignal  signal,
+                  BzEntryGroup *group);
 
 static void
 bz_window_dispose (GObject *object)
@@ -569,6 +575,7 @@ bz_window_class_init (BzWindowClass *klass)
   gtk_widget_class_install_action (widget_class, "window.open-library", NULL, action_open_library);
 
   gtk_widget_class_add_binding_action (widget_class, GDK_KEY_d, GDK_CONTROL_MASK, "window.open-library", NULL);
+  gtk_widget_class_add_binding_action (widget_class, GDK_KEY_w, GDK_CONTROL_MASK, "window.close", NULL);
 }
 
 static gboolean
@@ -641,11 +648,18 @@ has_inputs_changed (BzWindow          *self,
 static DexFuture *
 transact_fiber (TransactData *data)
 {
-  g_autoptr (BzWindow) self                           = NULL;
-  g_autoptr (GError) local_error                      = NULL;
-  g_autoptr (BzTransactionDialogResult) dialog_result = NULL;
-  g_autoptr (DexFuture) transact_future               = NULL;
-  g_autofree char *id_dup                             = NULL;
+  g_autoptr (BzWindow) self             = NULL;
+  g_autoptr (GError) local_error        = NULL;
+  g_autoptr (BzEntry) selected_entry    = NULL;
+  g_autoptr (DexFuture) transact_future = NULL;
+  g_autofree char *id_dup               = NULL;
+  BzMainConfig    *config               = NULL;
+  GListModel      *hooks                = NULL;
+  gboolean         delete_user_data     = FALSE;
+  GdkDisplay      *display              = NULL;
+  GdkSeat         *seat                 = NULL;
+  GdkDevice       *keyboard             = NULL;
+  GdkModifierType  modifiers            = GDK_NO_MODIFIER_MASK;
 
   bz_weak_get_or_return_reject (self, data->self);
 
@@ -663,30 +677,104 @@ transact_fiber (TransactData *data)
       bazaar_id = g_application_get_application_id (g_application_get_default ());
       if (g_strcmp0 (id_dup, bazaar_id) == 0)
         {
-          bz_show_error_for_widget (GTK_WIDGET (self), _("You can't remove Bazaar from Bazaar!"), _ ("You can't remove Bazaar from Bazaar!"));
+          bz_show_error_for_widget (GTK_WIDGET (self), _ ("You can't remove Bazaar from Bazaar!"), _ ("You can't remove Bazaar from Bazaar!"));
           return dex_future_new_false ();
         }
     }
 
-  // Show the dialog
-  dialog_result = dex_await_object (
-      bz_transaction_dialog_show (
-          GTK_WIDGET (self),
-          data->entry,
-          data->group,
-          data->remove,
-          data->auto_confirm),
-      &local_error);
+  config = bz_state_info_get_main_config (self->state);
+  if (config != NULL)
+    hooks = bz_main_config_get_hooks (config);
 
-  if (dialog_result == NULL)
-    return dex_future_new_for_error (g_steal_pointer (&local_error));
-  if (!bz_transaction_dialog_result_get_confirmed (dialog_result))
-    return dex_future_new_false ();
+#define RUN_HOOK(_signal)                                               \
+  G_STMT_START                                                          \
+  {                                                                     \
+    if (hooks != NULL &&                                                \
+        !dex_await (                                                    \
+            bz_run_hook_emission (                                      \
+                hooks, (_signal),                                       \
+                data->remove                                            \
+                    ? BZ_HOOK_TRANSACTION_TYPE_REMOVAL                  \
+                    : BZ_HOOK_TRANSACTION_TYPE_INSTALL,                 \
+                id_dup, NULL),                                          \
+            &local_error))                                              \
+      return dex_future_new_for_error (g_steal_pointer (&local_error)); \
+  }                                                                     \
+  G_STMT_END
+
+  RUN_HOOK (BZ_HOOK_SIGNAL_BEFORE_TRANSACTION);
+
+  display  = gdk_display_get_default ();
+  seat     = gdk_display_get_default_seat (display);
+  keyboard = gdk_seat_get_keyboard (seat);
+  if (keyboard != NULL)
+    modifiers = gdk_device_get_modifier_state (keyboard);
+
+  if (modifiers & GDK_SHIFT_MASK)
+    /* Holding shift while invoking a transaction skips the dialog and assumes
+       the first valid entry */
+    {
+      if (data->group != NULL)
+        {
+          g_autoptr (GListModel) store = NULL;
+          guint n_items                = 0;
+
+          store = dex_await_object (
+              bz_entry_group_dup_all_into_store (data->group),
+              &local_error);
+          if (store == NULL)
+            return dex_future_new_for_error (g_steal_pointer (&local_error));
+
+          n_items = g_list_model_get_n_items (store);
+          for (guint i = 0; i < n_items; i++)
+            {
+              g_autoptr (BzEntry) entry = NULL;
+              gboolean installed        = FALSE;
+
+              entry     = g_list_model_get_item (store, i);
+              installed = bz_entry_is_installed (entry);
+              if ((data->remove && installed) ||
+                  (!data->remove && !installed))
+                {
+                  selected_entry = g_steal_pointer (&entry);
+                  break;
+                }
+            }
+          if (selected_entry == NULL)
+            return dex_future_new_false ();
+        }
+      else
+        selected_entry = g_object_ref (data->entry);
+    }
+  else
+    {
+      g_autoptr (BzTransactionDialogResult) dialog_result = NULL;
+
+      // Show the dialog
+      dialog_result = dex_await_object (
+          bz_transaction_dialog_show (
+              GTK_WIDGET (self),
+              data->entry,
+              data->group,
+              data->remove,
+              data->auto_confirm),
+          &local_error);
+
+      if (dialog_result == NULL)
+        return dex_future_new_for_error (g_steal_pointer (&local_error));
+      if (!bz_transaction_dialog_result_get_confirmed (dialog_result))
+        return dex_future_new_false ();
+
+      selected_entry = g_object_ref (
+          bz_transaction_dialog_result_get_selected_entry (dialog_result));
+      delete_user_data = bz_transaction_dialog_result_get_delete_user_data (
+          dialog_result);
+    }
 
   // Perform the transaction
   transact_future = transact (
       self,
-      bz_transaction_dialog_result_get_selected_entry (dialog_result),
+      selected_entry,
       data->remove,
       data->source);
 
@@ -694,13 +782,16 @@ transact_fiber (TransactData *data)
     return dex_future_new_for_error (g_steal_pointer (&local_error));
 
   // Handle user data deletion
-  if (bz_transaction_dialog_result_get_delete_user_data (dialog_result))
+  if (delete_user_data)
     {
       if (data->group != NULL)
         bz_entry_group_reap_user_data (data->group);
       else
         dex_future_disown (bz_reap_user_data_dex (id_dup));
     }
+
+  RUN_HOOK (BZ_HOOK_SIGNAL_AFTER_TRANSACTION);
+#undef RUN_HOOK
 
   return dex_future_new_true ();
 }
@@ -771,6 +862,7 @@ bz_window_show_group (BzWindow     *self,
   g_return_if_fail (BZ_IS_ENTRY_GROUP (group));
 
   bz_full_view_set_entry_group (self->full_view, group);
+  emit_hook_disown (self, BZ_HOOK_SIGNAL_VIEW_APP, group);
 
   visible_page = adw_navigation_view_get_visible_page (self->navigation_view);
   if (visible_page != adw_navigation_view_find_page (self->navigation_view, "view"))
@@ -962,9 +1054,7 @@ search (BzWindow   *self,
         const char *initial)
 {
   if (initial != NULL && *initial != '\0')
-    {
-      bz_search_widget_set_text (self->search_widget, initial);
-    }
+    bz_search_widget_set_text (self->search_widget, initial);
 
   adw_view_stack_set_visible_child_name (self->main_view_stack, "search");
   adw_navigation_view_pop_to_tag (self->navigation_view, "main");
@@ -985,12 +1075,33 @@ set_page (BzWindow *self)
       adw_navigation_view_pop_to_tag (self->navigation_view, "main");
     }
   else
-    {
-      gtk_stack_set_visible_child_name (self->main_stack, "main");
-    }
+    gtk_stack_set_visible_child_name (self->main_stack, "main");
 
   selected_navigation_page_name = adw_navigation_view_get_visible_page_tag (self->navigation_view);
 
   if (g_strcmp0 (selected_navigation_page_name, "view") != 0)
     bz_full_view_set_entry_group (self->full_view, NULL);
+}
+
+static void
+emit_hook_disown (BzWindow     *self,
+                  BzHookSignal  signal,
+                  BzEntryGroup *group)
+{
+  BzMainConfig *config = NULL;
+  GListModel   *hooks  = NULL;
+
+  if (self->state == NULL)
+    return;
+
+  config = bz_state_info_get_main_config (self->state);
+  if (config == NULL)
+    return;
+
+  hooks = bz_main_config_get_hooks (config);
+  if (hooks == NULL)
+    return;
+
+  dex_future_disown (bz_run_hook_emission (
+      hooks, signal, 0, NULL, group));
 }

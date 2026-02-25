@@ -21,8 +21,10 @@
 #include <glib/gi18n.h>
 
 #include "bz-application-map-factory.h"
+#include "bz-application.h"
 #include "bz-entry-group.h"
 #include "bz-entry.h"
+#include "bz-error-dialog.h"
 #include "bz-error.h"
 #include "bz-flatpak-entry.h"
 #include "bz-list-tile.h"
@@ -335,8 +337,70 @@ run_cb (BzTransactionTile *self,
           &local_error);
 
       if (!result)
-        bz_show_error_for_widget (GTK_WIDGET (window), _("Failed to launch application"), local_error->message);
+        bz_show_error_for_widget (GTK_WIDGET (window), _ ("Failed to launch application"), local_error->message);
     }
+}
+
+static void
+cancel_cb (BzTransactionTile *self,
+           GtkButton         *button)
+{
+  gboolean                   result  = FALSE;
+  BzTransactionEntryTracker *tracker = NULL;
+  BzEntry                   *entry   = NULL;
+  BzStateInfo               *state   = NULL;
+  BzBackend                 *backend = NULL;
+
+  tracker = bz_transaction_tile_get_tracker (self);
+  if (tracker == NULL)
+    return;
+
+  entry = bz_transaction_entry_tracker_get_entry (tracker);
+  if (entry == NULL || !BZ_IS_FLATPAK_ENTRY (entry))
+    return;
+
+  state   = bz_state_info_get_default ();
+  backend = bz_state_info_get_backend (state);
+  if (backend == NULL)
+    return;
+
+  result = bz_backend_cancel_task_for_entry (backend, entry);
+  if (result)
+    gtk_widget_set_sensitive (GTK_WIDGET (button), FALSE);
+}
+
+static void
+error_clicked_cb (GtkListItem       *item,
+                  GtkButton         *button,
+                  BzTransactionTile *self)
+{
+  BzTransactionTask *task   = NULL;
+  const char        *error  = NULL;
+  const char        *name   = NULL;
+  BzErrorDialog     *dialog = NULL;
+
+  task = gtk_list_item_get_item (item);
+  if (task == NULL)
+    return;
+
+  error = bz_transaction_task_get_error (task);
+  if (error == NULL)
+    return;
+
+  name = bz_backend_transaction_op_payload_get_name (
+      bz_transaction_task_get_op (task));
+
+  if (name != NULL)
+    {
+      g_autofree char *body = NULL;
+
+      body   = g_strdup_printf ("%s: %s", name, error);
+      dialog = bz_error_dialog_new (_ ("Transaction Error"), body);
+    }
+  else
+    dialog = bz_error_dialog_new (_ ("Transaction Error"), error);
+
+  adw_dialog_present (ADW_DIALOG (dialog), GTK_WIDGET (self));
 }
 
 static void
@@ -379,6 +443,8 @@ bz_transaction_tile_class_init (BzTransactionTileClass *klass)
   gtk_widget_class_bind_template_callback (widget_class, is_completed);
   gtk_widget_class_bind_template_callback (widget_class, is_both);
   gtk_widget_class_bind_template_callback (widget_class, run_cb);
+  gtk_widget_class_bind_template_callback (widget_class, cancel_cb);
+  gtk_widget_class_bind_template_callback (widget_class, error_clicked_cb);
 
   gtk_widget_class_set_accessible_role (widget_class, GTK_ACCESSIBLE_ROLE_BUTTON);
 }

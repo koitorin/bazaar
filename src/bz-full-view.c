@@ -51,6 +51,7 @@
 #include "bz-stats-dialog.h"
 #include "bz-tag-list.h"
 #include "bz-template-callbacks.h"
+#include "bz-util.h"
 
 struct _BzFullView
 {
@@ -59,7 +60,9 @@ struct _BzFullView
   BzStateInfo          *state;
   BzTransactionManager *transactions;
   BzEntryGroup         *group;
+  DexFuture            *ui_future;
   BzResult             *ui_entry;
+  BzResult             *runtime;
   BzResult             *group_model;
   gboolean              show_sidebar;
 
@@ -116,10 +119,12 @@ bz_full_view_dispose (GObject *object)
 {
   BzFullView *self = BZ_FULL_VIEW (object);
 
+  dex_clear (&self->ui_future);
   g_clear_object (&self->state);
   g_clear_object (&self->transactions);
   g_clear_object (&self->group);
   g_clear_object (&self->ui_entry);
+  g_clear_object (&self->runtime);
   g_clear_object (&self->group_model);
   g_clear_object (&self->main_menu);
 
@@ -170,12 +175,11 @@ bz_full_view_set_property (GObject      *object,
     case PROP_ENTRY_GROUP:
       bz_full_view_set_entry_group (self, g_value_get_object (value));
       break;
-    case PROP_UI_ENTRY:
     case PROP_MAIN_MENU:
-      if (self->main_menu)
-        g_object_unref (self->main_menu);
+      g_clear_object (&self->main_menu);
       self->main_menu = g_value_dup_object (value);
       break;
+    case PROP_UI_ENTRY:
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
     }
@@ -280,9 +284,16 @@ format_size (gpointer object, guint64 value)
 
 static char *
 get_size_label (gpointer object,
-                gboolean is_installable)
+                gboolean is_installable,
+                gboolean runtime_installed,
+                guint64  runtime_size)
 {
-  // Translators: .
+  if (is_installable && !runtime_installed && runtime_size > 0)
+    {
+      g_autofree char *size_str = g_format_size (runtime_size);
+      return g_strdup_printf (_ ("+%s runtime"), size_str);
+    }
+
   return g_strdup (is_installable ? _ ("Download") : _ ("Installed"));
 }
 
@@ -1247,11 +1258,14 @@ bz_full_view_new (void)
 
 static DexFuture *
 on_ui_entry_resolved (DexFuture *future,
-                      gpointer   user_data)
+                      GWeakRef  *wr)
 {
-  BzEntry      *ui_entry       = NULL;
-  BzResult     *runtime_result = NULL;
-  const GValue *value          = NULL;
+  g_autoptr (BzFullView) self         = NULL;
+  BzEntry *ui_entry                   = NULL;
+  g_autoptr (BzResult) runtime_result = NULL;
+  const GValue *value                 = NULL;
+
+  bz_weak_get_or_return_reject (self, wr);
 
   value = dex_future_get_value (future, NULL);
   if (value != NULL && G_VALUE_HOLDS_OBJECT (value))
@@ -1259,15 +1273,7 @@ on_ui_entry_resolved (DexFuture *future,
       ui_entry = g_value_get_object (value);
 
       if (BZ_IS_FLATPAK_ENTRY (ui_entry))
-        {
-          runtime_result = bz_flatpak_entry_get_runtime (BZ_FLATPAK_ENTRY (ui_entry));
-
-          if (runtime_result != NULL && !bz_result_get_resolved (runtime_result))
-            {
-              g_autoptr (DexFuture) runtime_future = bz_result_dup_future (runtime_result);
-              dex_future_disown (g_steal_pointer (&runtime_future));
-            }
-        }
+        self->runtime = bz_flatpak_entry_dup_runtime_result (BZ_FLATPAK_ENTRY (ui_entry));
     }
 
   return dex_future_new_for_boolean (TRUE);
@@ -1284,8 +1290,10 @@ bz_full_view_set_entry_group (BzFullView   *self,
   if (group == self->group)
     return;
 
+  dex_clear (&self->ui_future);
   g_clear_object (&self->group);
   g_clear_object (&self->ui_entry);
+  g_clear_object (&self->runtime);
   g_clear_object (&self->group_model);
   gtk_toggle_button_set_active (self->description_toggle, FALSE);
 
@@ -1296,9 +1304,11 @@ bz_full_view_set_entry_group (BzFullView   *self,
 
       if (self->ui_entry != NULL && bz_result_get_resolved (self->ui_entry))
         {
-          g_autoptr (GListStore) store = NULL;
-          g_autoptr (DexFuture) future = NULL;
-          BzEntry *entry               = NULL;
+          BzEntry *entry                      = NULL;
+          g_autoptr (GListStore) store        = NULL;
+          g_autoptr (DexFuture) future        = NULL;
+          g_autoptr (DexFuture) object_future = NULL;
+          GWeakRef *wr                        = NULL;
 
           entry = bz_result_get_object (self->ui_entry);
           store = g_list_store_new (BZ_TYPE_ENTRY);
@@ -1307,7 +1317,10 @@ bz_full_view_set_entry_group (BzFullView   *self,
           future            = dex_future_new_for_object (store);
           self->group_model = bz_result_new (future);
 
-          on_ui_entry_resolved (dex_future_new_for_object (entry), self);
+          object_future = dex_future_new_for_object (entry);
+          wr            = bz_track_weak (self);
+          dex_unref (on_ui_entry_resolved (object_future, wr));
+          bz_weak_release (wr);
         }
       else
         {
@@ -1318,9 +1331,15 @@ bz_full_view_set_entry_group (BzFullView   *self,
 
           if (self->ui_entry != NULL)
             {
-              g_autoptr (DexFuture) ui_future = bz_result_dup_future (self->ui_entry);
-              ui_future                       = dex_future_then (ui_future, on_ui_entry_resolved, g_object_ref (self), g_object_unref);
-              dex_future_disown (g_steal_pointer (&ui_future));
+              g_autoptr (DexFuture) ui_future = NULL;
+
+              ui_future = bz_result_dup_future (self->ui_entry);
+              ui_future = dex_future_then (
+                  ui_future,
+                  (DexFutureCallback) on_ui_entry_resolved,
+                  bz_track_weak (self),
+                  bz_weak_release);
+              self->ui_future = g_steal_pointer (&ui_future);
             }
         }
 

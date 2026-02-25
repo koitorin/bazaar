@@ -20,9 +20,6 @@
 
 #include <glib/gi18n.h>
 
-#include "bz-entry-group-util.h"
-#include "bz-env.h"
-#include "bz-error.h"
 #include "bz-installed-tile.h"
 #include "bz-library-page.h"
 #include "bz-section-view.h"
@@ -172,9 +169,8 @@ format_update_count (gpointer    object,
 static void
 tile_activated_cb (BzListTile *tile)
 {
-  BzLibraryPage *self            = NULL;
-  BzEntryGroup  *group           = NULL;
-  g_autoptr (BzEntry) entry      = NULL;
+  BzLibraryPage *self  = NULL;
+  BzEntryGroup  *group = NULL;
 
   g_assert (BZ_IS_LIST_TILE (tile));
 
@@ -189,18 +185,21 @@ tile_activated_cb (BzListTile *tile)
   else if (BZ_IS_TRANSACTION_TILE (tile))
     {
       BzTransactionEntryTracker *tracker = NULL;
+      BzEntry                   *entry   = NULL;
 
       tracker = bz_transaction_tile_get_tracker (BZ_TRANSACTION_TILE (tile));
       if (tracker == NULL)
         return;
 
       entry = bz_transaction_entry_tracker_get_entry (tracker);
-
       group = bz_application_map_factory_convert_one (
-        bz_state_info_get_application_factory (self->state),
-        gtk_string_object_new (bz_entry_get_id (entry)));
+          bz_state_info_get_application_factory (self->state),
+          gtk_string_object_new (bz_entry_get_id (entry)));
     }
   else
+    return;
+
+  if (group == NULL)
     return;
 
   g_signal_emit (self, signals[SIGNAL_SHOW], 0, group);
@@ -237,6 +236,19 @@ updates_card_update_cb (BzLibraryPage *self,
                         BzUpdatesCard *card)
 {
   g_signal_emit (self, signals[SIGNAL_UPDATE], 0, entries);
+}
+
+static void
+global_search_cb (BzLibraryPage *self,
+                  GtkButton     *button)
+{
+  const char *text = NULL;
+
+  text = gtk_editable_get_text (GTK_EDITABLE (self->search_bar));
+  if (text != NULL && *text != '\0')
+    gtk_widget_activate_action (GTK_WIDGET (self), "app.search", "s", text);
+
+  gtk_editable_set_text (GTK_EDITABLE (self->search_bar), "");
 }
 
 static void
@@ -361,6 +373,7 @@ bz_library_page_class_init (BzLibraryPageClass *klass)
   gtk_widget_class_bind_template_callback (widget_class, search_text_changed);
   gtk_widget_class_bind_template_callback (widget_class, clear_tasks_cb);
   gtk_widget_class_bind_template_callback (widget_class, updates_card_update_cb);
+  gtk_widget_class_bind_template_callback (widget_class, global_search_cb);
 }
 
 static void
